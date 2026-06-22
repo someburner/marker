@@ -54,6 +54,18 @@ class TableProcessor(BaseProcessor):
         float,
         "The percentage of rows that need to be split across the table before row splitting is active.",
     ] = 0.5
+    preserve_ragged_table_alignment: Annotated[
+        bool,
+        "Preserve vertical alignment in ragged table rows by padding sparse value cells with blank lines.",
+    ] = False
+    ragged_table_alignment_min_anchor_lines: Annotated[
+        int,
+        "Minimum number of anchor cell lines required before preserving ragged table alignment.",
+    ] = 4
+    ragged_table_alignment_min_value_lines: Annotated[
+        int,
+        "Minimum number of value cell lines required before preserving ragged table alignment.",
+    ] = 2
     pdftext_workers: Annotated[
         int,
         "The number of workers to use for pdftext.",
@@ -135,6 +147,8 @@ class TableProcessor(BaseProcessor):
 
         self.split_combined_rows(tables)  # Split up rows that were combined
         self.combine_dollar_column(tables)  # Combine columns that are just dollar signs
+        if self.preserve_ragged_table_alignment:
+            self.preserve_ragged_row_alignment(tables)
 
         # Assign table cells to the table
         table_idx = 0
@@ -187,7 +201,10 @@ class TableProcessor(BaseProcessor):
     def finalize_cell_text(self, cell: SuryaTableCell):
         fixed_text = []
         text_lines = cell.text_lines if cell.text_lines else []
-        for line in text_lines:
+        for line in self.merge_cell_text_fragments(text_lines):
+            if line.get("preserve_blank_line"):
+                fixed_text.append("")
+                continue
             text = line["text"].strip()
             if not text or text == ".":
                 continue
@@ -217,6 +234,219 @@ class TableProcessor(BaseProcessor):
             text = self.normalize_spaces(fix_text(text))
             fixed_text.append(text)
         return fixed_text
+
+    @classmethod
+    def merge_text_line_run(cls, text_lines: list[dict]) -> list[dict]:
+        if not text_lines:
+            return []
+        if any([not line.get("bbox") for line in text_lines]):
+            return text_lines
+
+        tolerance = max(cls.median_line_height(text_lines) * 0.55, 4)
+        buckets = cls.cluster_line_centers(text_lines, tolerance)
+        if not buckets:
+            return text_lines
+
+        lines_by_bucket = defaultdict(list)
+        for line in text_lines:
+            center = cls.line_center_y(line)
+            if center is None:
+                continue
+            bucket_idx = cls.nearest_bucket(center, buckets)
+            if abs(center - buckets[bucket_idx]) <= tolerance:
+                lines_by_bucket[bucket_idx].append(line)
+
+        merged_lines = []
+        for bucket_idx in range(len(buckets)):
+            bucket_lines = sorted(
+                lines_by_bucket.get(bucket_idx, []), key=lambda line: line["bbox"][0]
+            )
+            if not bucket_lines:
+                continue
+            text = " ".join([line["text"].strip() for line in bucket_lines])
+            bbox = [
+                min([line["bbox"][0] for line in bucket_lines]),
+                min([line["bbox"][1] for line in bucket_lines]),
+                max([line["bbox"][2] for line in bucket_lines]),
+                max([line["bbox"][3] for line in bucket_lines]),
+            ]
+            merged_lines.append({"text": text, "bbox": bbox})
+        return merged_lines
+
+    @classmethod
+    def merge_cell_text_fragments(cls, text_lines: list[dict]) -> list[dict]:
+        merged_lines = []
+        text_line_run = []
+        for line in text_lines:
+            if line.get("preserve_blank_line"):
+                merged_lines.extend(cls.merge_text_line_run(text_line_run))
+                text_line_run = []
+                merged_lines.append(line)
+            else:
+                text_line_run.append(line)
+        merged_lines.extend(cls.merge_text_line_run(text_line_run))
+        return merged_lines
+
+    @staticmethod
+    def line_center_y(line: dict) -> float | None:
+        bbox = line.get("bbox")
+        if not bbox or len(bbox) < 4:
+            return None
+        return (bbox[1] + bbox[3]) / 2
+
+    @staticmethod
+    def bbox_text_lines(cell: SuryaTableCell) -> list[dict]:
+        return [
+            line
+            for line in (cell.text_lines or [])
+            if isinstance(line, dict) and "text" in line and "bbox" in line
+        ]
+
+    @staticmethod
+    def median_line_height(lines: list[dict]) -> float:
+        heights = sorted(
+            line["bbox"][3] - line["bbox"][1]
+            for line in lines
+            if line.get("bbox") and len(line["bbox"]) >= 4
+        )
+        if not heights:
+            return 0
+        mid = len(heights) // 2
+        if len(heights) % 2:
+            return heights[mid]
+        return (heights[mid - 1] + heights[mid]) / 2
+
+    @classmethod
+    def cluster_line_centers(cls, lines: list[dict], tolerance: float) -> list[float]:
+        centers = sorted(
+            center
+            for line in lines
+            if (center := cls.line_center_y(line)) is not None
+        )
+        buckets: list[list[float]] = []
+        for center in centers:
+            bucket_center = sum(buckets[-1]) / len(buckets[-1]) if buckets else None
+            if bucket_center is None or abs(center - bucket_center) > tolerance:
+                buckets.append([center])
+            else:
+                buckets[-1].append(center)
+        return [sum(bucket) / len(bucket) for bucket in buckets]
+
+    @staticmethod
+    def value_like_text(text: str) -> bool:
+        text = text.strip()
+        if not text:
+            return False
+        if len(text) > 24:
+            return False
+        if re.search(r"[A-Za-z]{4,}", text):
+            return False
+        return bool(re.search(r"\d|[<>±≤≥]", text))
+
+    @classmethod
+    def value_alignment_cell(cls, cell: SuryaTableCell) -> bool:
+        lines = cls.bbox_text_lines(cell)
+        if len(lines) < 2:
+            return False
+        return all(cls.value_like_text(line["text"]) for line in lines)
+
+    @staticmethod
+    def nearest_bucket(center: float, buckets: list[float]) -> int:
+        return min(range(len(buckets)), key=lambda idx: abs(center - buckets[idx]))
+
+    @classmethod
+    def pad_cell_lines_to_buckets(
+        cls, cell: SuryaTableCell, buckets: list[float], tolerance: float
+    ):
+        lines_by_bucket = defaultdict(list)
+        for line in cls.bbox_text_lines(cell):
+            center = cls.line_center_y(line)
+            if center is None:
+                continue
+            bucket_idx = cls.nearest_bucket(center, buckets)
+            if abs(center - buckets[bucket_idx]) <= tolerance:
+                lines_by_bucket[bucket_idx].append(line)
+
+        if not lines_by_bucket:
+            return
+
+        padded_lines = []
+        for bucket_idx in range(len(buckets)):
+            if bucket_idx in lines_by_bucket:
+                padded_lines.extend(lines_by_bucket[bucket_idx])
+            else:
+                padded_lines.append({"text": "", "preserve_blank_line": True})
+        cell.text_lines = padded_lines
+
+    @staticmethod
+    def is_sparse_continuation_row(row_cells: list[SuryaTableCell]) -> bool:
+        if not row_cells:
+            return False
+
+        leading_cells = [
+            cell
+            for cell in row_cells
+            if (cell.col_id or 0) <= 1 and not (cell.text_lines or [])
+        ]
+        text_cells = [cell for cell in row_cells if cell.text_lines]
+        return len(leading_cells) >= 2 and 1 <= len(text_cells) <= 2
+
+    def preserve_ragged_row_alignment(self, tables: List[TableResult]):
+        for table in tables:
+            if len(table.cells) == 0:
+                continue
+
+            unique_rows = sorted(list(set([c.row_id for c in table.cells])))
+            cells_by_row = {
+                row: sorted(
+                    [c for c in table.cells if c.row_id == row],
+                    key=lambda cell: cell.col_id or 0,
+                )
+                for row in unique_rows
+            }
+            for row_index, row in enumerate(unique_rows):
+                row_cells = sorted(
+                    cells_by_row[row],
+                    key=lambda cell: cell.col_id or 0,
+                )
+                if any([cell.is_header for cell in row_cells]):
+                    continue
+                if any([(cell.rowspan or 1) != 1 for cell in row_cells]):
+                    continue
+                if row_index + 1 < len(unique_rows) and self.is_sparse_continuation_row(
+                    cells_by_row[unique_rows[row_index + 1]]
+                ):
+                    continue
+
+                line_cells = [
+                    cell for cell in row_cells if len(self.bbox_text_lines(cell)) > 0
+                ]
+                if not line_cells:
+                    continue
+
+                anchor_cell = max(
+                    line_cells, key=lambda cell: len(self.bbox_text_lines(cell))
+                )
+                anchor_lines = self.bbox_text_lines(anchor_cell)
+                if len(anchor_lines) < self.ragged_table_alignment_min_anchor_lines:
+                    continue
+
+                tolerance = max(self.median_line_height(anchor_lines) * 0.55, 4)
+                buckets = self.cluster_line_centers(anchor_lines, tolerance)
+                if len(buckets) < self.ragged_table_alignment_min_anchor_lines:
+                    continue
+
+                value_cells = [
+                    cell
+                    for cell in row_cells
+                    if cell is not anchor_cell
+                    and self.value_alignment_cell(cell)
+                    and len(self.bbox_text_lines(cell))
+                    >= self.ragged_table_alignment_min_value_lines
+                    and len(self.bbox_text_lines(cell)) < len(buckets)
+                ]
+                for cell in value_cells:
+                    self.pad_cell_lines_to_buckets(cell, buckets, tolerance)
 
     @staticmethod
     def normalize_spaces(text):
