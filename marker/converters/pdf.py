@@ -36,6 +36,7 @@ from marker.processors.llm.llm_table import LLMTableProcessor
 from marker.processors.page_header import PageHeaderProcessor
 from marker.processors.reference import ReferenceProcessor
 from marker.processors.sectionheader import SectionHeaderProcessor
+from marker.processors.sparse_table import SparseTableProcessor
 from marker.processors.table import TableProcessor
 from marker.processors.text import TextProcessor
 from marker.processors.block_relabel import BlockRelabelProcessor
@@ -93,6 +94,7 @@ class PdfConverter(BaseConverter):
         PageHeaderProcessor,
         MarginaliaProcessor,
         SectionHeaderProcessor,
+        SparseTableProcessor,
         TableProcessor,
         LLMTableProcessor,
         LLMTableMergeProcessor,
