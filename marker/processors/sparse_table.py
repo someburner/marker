@@ -20,10 +20,10 @@ class SparseTableProcessor(BaseProcessor):
     misclassify these as Text, which prevents TableProcessor from running.
     """
 
-    detect_sparse_bitfield_tables: Annotated[
+    use_sparse_table_processor: Annotated[
         bool,
-        "Whether to relabel sparse 8-bit register diagrams from Text to Table.",
-    ] = True
+        "Whether to relabel sparse sequential text blocks from Text to Table.",
+    ] = False
     sparse_table_min_width_ratio: Annotated[
         float,
         "Minimum page-width ratio for a sparse bitfield table candidate.",
@@ -55,7 +55,7 @@ class SparseTableProcessor(BaseProcessor):
     numeric_suffix_regex = re.compile(r"^([A-Za-z_./:\-]+)([0-9]+)$")
 
     def __call__(self, document: Document):
-        if not self.detect_sparse_bitfield_tables:
+        if not self.use_sparse_table_processor:
             return
 
         for page in document.pages:
