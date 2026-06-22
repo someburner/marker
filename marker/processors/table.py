@@ -58,6 +58,10 @@ class TableProcessor(BaseProcessor):
         bool,
         "Preserve vertical alignment in ragged table rows by padding sparse value cells with blank lines.",
     ] = False
+    merge_table_text_fragments: Annotated[
+        bool,
+        "Merge same-line PDF text fragments inside table cells before rendering.",
+    ] = False
     ragged_table_alignment_min_anchor_lines: Annotated[
         int,
         "Minimum number of anchor cell lines required before preserving ragged table alignment.",
@@ -201,7 +205,9 @@ class TableProcessor(BaseProcessor):
     def finalize_cell_text(self, cell: SuryaTableCell):
         fixed_text = []
         text_lines = cell.text_lines if cell.text_lines else []
-        for line in self.merge_cell_text_fragments(text_lines):
+        if self.merge_table_text_fragments:
+            text_lines = self.merge_cell_text_fragments(text_lines)
+        for line in text_lines:
             if line.get("preserve_blank_line"):
                 fixed_text.append("")
                 continue
