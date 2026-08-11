@@ -78,7 +78,9 @@ class TableProcessor(BaseProcessor):
                 # Scanned/garbled pages: the full-page OCR already produced the
                 # table HTML - trust it, don't redo.
                 if block.html:
-                    self.table_stats["tables_ocr"] += 1
+                    method = block.text_extraction_method
+                    stat = "tables_pdftext" if method == "pdftext" else "tables_ocr"
+                    self.table_stats[stat] += 1
                     continue
 
                 html = self.reconstruct_digital_table(page, block)

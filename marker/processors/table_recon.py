@@ -32,6 +32,7 @@ _NUMISH = re.compile(r"^-?[\d,.]*\d[\d,.]*%?$")
 _NUM_TOK = re.compile(r"-?[\d,]+(\.\d+)?%?")
 _YEAR = re.compile(r"^(19|20)\d\d$")
 _PCTISH = re.compile(r"(less than|to less|%)")
+_CODE_CELL = re.compile(r"^[A-Za-z0-9_./:\-\[\]{}()]+$")
 
 
 # --------------------------------------------------------------------------- #
@@ -324,6 +325,162 @@ def _build_html(names, grid, has_header: bool) -> str:
         out.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
     out.append("</tbody></table>")
     return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# sparse datasheet tables
+# --------------------------------------------------------------------------- #
+def _cluster_overlapping_spans(lines):
+    """Group vertically wrapped spans that occupy the same x interval."""
+    spans = sorted(
+        [
+            (text.strip(), x0, x1, y0)
+            for row, y0, _ in lines
+            for text, x0, x1 in row
+            if text.strip()
+        ],
+        key=lambda span: (span[1], span[2], span[3]),
+    )
+    clusters = []
+    for span in spans:
+        matching = [
+            cluster
+            for cluster in clusters
+            if span[1] <= cluster["x1"] + 1.0 and span[2] >= cluster["x0"] - 1.0
+        ]
+        if not matching:
+            clusters.append({"x0": span[1], "x1": span[2], "spans": [span]})
+            continue
+
+        cluster = matching[0]
+        cluster["x0"] = min(cluster["x0"], span[1])
+        cluster["x1"] = max(cluster["x1"], span[2])
+        cluster["spans"].append(span)
+        for extra in matching[1:]:
+            cluster["x0"] = min(cluster["x0"], extra["x0"])
+            cluster["x1"] = max(cluster["x1"], extra["x1"])
+            cluster["spans"].extend(extra["spans"])
+            clusters.remove(extra)
+    return sorted(clusters, key=lambda cluster: cluster["x0"])
+
+
+def _reconstruct_bitfield_html(lines, bbox):
+    """Reconstruct a one-row register bitfield, including wrapped labels."""
+    bx0, by0, bx1, by1 = bbox
+    if bx1 <= bx0 or by1 <= by0 or (bx1 - bx0) / (by1 - by0) < 5:
+        return None
+
+    clusters = _cluster_overlapping_spans(lines)
+    if not 3 <= len(clusters) <= 32:
+        return None
+
+    centers = [(cluster["x0"] + cluster["x1"]) / 2 for cluster in clusters]
+    gaps = [right - left for left, right in itertools.pairwise(centers)]
+    typical_gap = median(gaps)
+    if typical_gap <= 0:
+        return None
+    if any(abs(gap - typical_gap) > typical_gap * 0.3 for gap in gaps):
+        return None
+    if centers[-1] - centers[0] < (bx1 - bx0) * 0.55:
+        return None
+
+    cells = []
+    for cluster in clusters:
+        parts = sorted(cluster["spans"], key=lambda span: (span[3], span[1]))
+        cell = "".join(re.sub(r"\s+", "", part[0]) for part in parts)
+        if not cell or not _CODE_CELL.match(cell):
+            return None
+        cells.append(cell)
+
+    return _build_html([], [cells], False)
+
+
+def _join_inline_spans(spans):
+    text = ""
+    previous_x1 = None
+    for value, x0, x1 in sorted(spans, key=lambda span: span[1]):
+        value = " ".join(value.split())
+        if not value:
+            continue
+        separator = " "
+        if previous_x1 is None:
+            separator = ""
+        elif value[0] in ".,;:!?)]}/" or text[-1] in "([{/_":
+            separator = ""
+        elif value == "g" and text.endswith(("µ", "m")):
+            separator = ""
+        text += separator + value
+        previous_x1 = x1
+    return text
+
+
+def _reconstruct_definition_html(lines, bbox):
+    """Reconstruct compact field/description tables by their x/y anchors."""
+    spans = [
+        (text.strip(), x0, x1, y0, y1)
+        for row, y0, y1 in lines
+        for text, x0, x1 in row
+        if text.strip()
+    ]
+    if len(spans) < 2:
+        return None
+
+    bx0, _, bx1, _ = bbox
+    left_x = min(span[1] for span in spans)
+    left_tolerance = max(3.0, (bx1 - bx0) * 0.03)
+    keys = [
+        span
+        for span in spans
+        if span[1] <= left_x + left_tolerance
+        and not re.search(r"\s", span[0])
+        and _CODE_CELL.match(span[0])
+    ]
+    if not keys:
+        return None
+
+    keys = sorted(keys, key=lambda span: (span[3] + span[4]) / 2)
+    right_start = max(span[2] for span in keys) + 3.0
+    description_lines = []
+    for row, y0, y1 in lines:
+        right_spans = [span for span in row if span[1] >= right_start]
+        if right_spans:
+            description_lines.append(
+                (_join_inline_spans(right_spans), y0, y1, right_spans[0][1])
+            )
+    if not description_lines:
+        return None
+    if not any(any(char.islower() for char in line[0]) for line in description_lines):
+        return None
+
+    starts = [line[3] for line in description_lines]
+    if max(starts) - min(starts) > max(8.0, (bx1 - bx0) * 0.03):
+        return None
+
+    descriptions = [[] for _ in keys]
+    key_centers = [(span[3] + span[4]) / 2 for span in keys]
+    for text, y0, y1, _ in description_lines:
+        center = (y0 + y1) / 2
+        row_idx = min(
+            range(len(keys)), key=lambda idx: abs(key_centers[idx] - center)
+        )
+        descriptions[row_idx].append((y0, text))
+    if any(not parts for parts in descriptions):
+        return None
+
+    grid = []
+    for key, parts in zip(keys, descriptions, strict=True):
+        description = " ".join(text for _, text in sorted(parts))
+        grid.append([key[0], description])
+    return _build_html([], grid, False)
+
+
+def reconstruct_sparse_table_html(lines, bbox):
+    """Return high-confidence HTML for sparse datasheet tables, or None."""
+    if not lines or not _garble_ok(lines):
+        return None
+    return _reconstruct_bitfield_html(lines, bbox) or _reconstruct_definition_html(
+        lines, bbox
+    )
 
 
 def _line_tokens(line: dict, bbox):
