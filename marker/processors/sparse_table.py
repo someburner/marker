@@ -4,10 +4,6 @@ from typing import Annotated
 
 from marker.logger import get_logger
 from marker.processors import BaseProcessor
-from marker.processors.table_recon import (
-    reconstruct_sparse_table_html,
-    table_lines_from_pdftext,
-)
 from marker.schema import BlockTypes
 from marker.schema.document import Document
 from marker.schema.registry import get_block_class
@@ -67,9 +63,6 @@ class SparseTableProcessor(BaseProcessor):
             for idx, block in enumerate(blocks):
                 if block.removed:
                     continue
-                if block.block_type == BlockTypes.Table:
-                    self.fill_sparse_table(page, block)
-                    continue
                 if block.block_type != BlockTypes.Text:
                     continue
 
@@ -77,30 +70,13 @@ class SparseTableProcessor(BaseProcessor):
                 if self.is_split_sparse_bitfield_table(
                     block, next_block, page, document
                 ):
-                    table = self.relabel_as_table(
-                        page, block, extra_block=next_block
-                    )
-                    self.fill_sparse_table(page, table)
+                    self.relabel_as_table(page, block, extra_block=next_block)
                     continue
 
                 if not self.is_sparse_bitfield_table(block, page, document):
                     continue
 
-                table = self.relabel_as_table(page, block)
-                self.fill_sparse_table(page, table)
-
-    @staticmethod
-    def fill_sparse_table(page, block):
-        if block.html or not page.pdftext_page:
-            return
-        lines = table_lines_from_pdftext(page.pdftext_page, block.polygon.bbox)
-        html = reconstruct_sparse_table_html(lines, block.polygon.bbox)
-        if not html:
-            return
-        block.structure = []
-        block.html = html
-        block.text_extraction_method = "pdftext"
-        logger.debug(f"Reconstructed sparse table {block.id}")
+                self.relabel_as_table(page, block)
 
     @staticmethod
     def next_text_block(blocks, idx):
@@ -136,7 +112,6 @@ class SparseTableProcessor(BaseProcessor):
             page.remove_structure_items([extra_block.id])
             extra_block.removed = True
         logger.debug(f"Relabelled sparse bitfield table {block.id}")
-        return new_block
 
     def is_sparse_bitfield_table(self, block, page, document: Document) -> bool:
         if block.structure is None:

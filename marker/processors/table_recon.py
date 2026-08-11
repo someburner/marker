@@ -387,6 +387,11 @@ def _reconstruct_bitfield_html(lines, bbox):
     cells = []
     for cluster in clusters:
         parts = sorted(cluster["spans"], key=lambda span: (span[3], span[1]))
+        if any(
+            re.search(r"\s", part[0]) and any(char.islower() for char in part[0])
+            for part in parts
+        ):
+            return None
         cell = "".join(re.sub(r"\s+", "", part[0]) for part in parts)
         if not cell or not _CODE_CELL.match(cell):
             return None
@@ -444,6 +449,12 @@ def _reconstruct_definition_html(lines, bbox):
     for row, y0, y1 in lines:
         right_spans = [span for span in row if span[1] >= right_start]
         if right_spans:
+            gaps = [
+                right[1] - left[2]
+                for left, right in itertools.pairwise(right_spans)
+            ]
+            if any(gap > max(3.0, (bx1 - bx0) * 0.01) for gap in gaps):
+                return None
             description_lines.append(
                 (_join_inline_spans(right_spans), y0, y1, right_spans[0][1])
             )

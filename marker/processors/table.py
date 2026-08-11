@@ -7,6 +7,7 @@ from surya.recognition import RecognitionPredictor, _detect_repeat_loop
 
 from marker.processors import BaseProcessor
 from marker.processors.table_recon import (
+    reconstruct_sparse_table_html,
     reconstruct_table_html,
     table_lines_from_pdftext,
 )
@@ -54,6 +55,10 @@ class TableProcessor(BaseProcessor):
         "Whether to disable the tqdm progress bar.",
     ] = False
     disable_ocr: Annotated[bool, "Disable OCR entirely."] = False
+    use_sparse_table_processor: Annotated[
+        bool,
+        "Whether to use deterministic sparse datasheet table reconstruction.",
+    ] = False
 
     def __init__(
         self,
@@ -117,8 +122,16 @@ class TableProcessor(BaseProcessor):
             return None
         lines = table_lines_from_pdftext(pdftext_page, block.polygon.bbox)
         result = reconstruct_table_html(lines)
+        sparse_html = None
+        if self.use_sparse_table_processor:
+            sparse_html = reconstruct_sparse_table_html(lines, block.polygon.bbox)
+        if sparse_html and (
+            not result or sparse_html.count("<tr>") > result[0].count("<tr>")
+        ):
+            return sparse_html
         if not result:
             return None
+
         html, score = result
         min_score = self.min_recon_score
         if min_score is None:

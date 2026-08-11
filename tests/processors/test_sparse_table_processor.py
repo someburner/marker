@@ -76,6 +76,33 @@ def test_reconstructs_touching_prose_and_unit_spans():
     ]
 
 
+def test_rejects_regular_multicolumn_table():
+    lines = [
+        (
+            [
+                ("Model", 10, 45),
+                ("Temperature Range", 70, 140),
+                ("Package Description", 170, 250),
+                ("Quantity", 280, 320),
+            ],
+            10,
+            18,
+        ),
+        (
+            [
+                ("ADXL380", 10, 45),
+                ("-40 to 125 C", 70, 135),
+                ("14-Terminal LGA", 170, 245),
+                ("5000", 285, 310),
+            ],
+            30,
+            38,
+        ),
+    ]
+
+    assert reconstruct_sparse_table_html(lines, [0, 0, 340, 45]) is None
+
+
 def test_rejects_prose():
     lines = [
         ([("This is a sentence, not a sparse table.", 10, 170)], 10, 18),
