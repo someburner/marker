@@ -402,12 +402,12 @@ def _reconstruct_bitfield_html(lines, bbox):
             for part in parts
         ):
             return None
+        if len(parts) > 1 and any(
+            any(char.islower() for char in part[0]) for part in parts
+        ):
+            return None
         cell = "".join(re.sub(r"\s+", "", part[0]) for part in parts)
         if not cell or not _CODE_CELL.match(cell):
-            return None
-        if cell.upper() != cell and not (
-            len(parts) == 1 and re.match(r"^bit\d+$", cell)
-        ):
             return None
         cells.append(cell)
 

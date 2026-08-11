@@ -146,6 +146,23 @@ def test_rejects_regular_multicolumn_table():
     assert reconstruct_sparse_table_html(lines, [0, 0, 340, 45]) is None
 
 
+def test_rejects_stacked_bus_sequence_rows():
+    lines = [
+        (
+            [("Master", 10, 40), ("ST", 70, 85), ("SAD", 120, 140)],
+            10,
+            18,
+        ),
+        (
+            [("Slave", 10, 40), ("SAK", 70, 88), ("SAK", 120, 138)],
+            25,
+            33,
+        ),
+    ]
+
+    assert reconstruct_sparse_table_html(lines, [0, 0, 160, 36]) is None
+
+
 def test_rejects_prose():
     lines = [
         ([("This is a sentence, not a sparse table.", 10, 170)], 10, 18),
