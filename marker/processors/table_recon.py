@@ -370,7 +370,17 @@ def _reconstruct_bitfield_html(lines, bbox):
     if bx1 <= bx0 or by1 <= by0 or (bx1 - bx0) / (by1 - by0) < 5:
         return None
 
-    clusters = _cluster_overlapping_spans(lines)
+    caption_lines = [
+        row
+        for row, _, _ in lines
+        if len(row) == 1 and re.match(r"^Table\s+\d+\.", row[0][0])
+    ]
+    bitfield_lines = [
+        line
+        for line in lines
+        if not (len(line[0]) == 1 and re.match(r"^Table\s+\d+\.", line[0][0][0]))
+    ]
+    clusters = _cluster_overlapping_spans(bitfield_lines)
     if not 3 <= len(clusters) <= 32:
         return None
 
@@ -379,7 +389,7 @@ def _reconstruct_bitfield_html(lines, bbox):
     typical_gap = median(gaps)
     if typical_gap <= 0:
         return None
-    if any(abs(gap - typical_gap) > typical_gap * 0.3 for gap in gaps):
+    if any(abs(gap - typical_gap) > typical_gap * 0.5 for gap in gaps):
         return None
     if centers[-1] - centers[0] < (bx1 - bx0) * 0.55:
         return None
@@ -395,9 +405,17 @@ def _reconstruct_bitfield_html(lines, bbox):
         cell = "".join(re.sub(r"\s+", "", part[0]) for part in parts)
         if not cell or not _CODE_CELL.match(cell):
             return None
+        if cell.upper() != cell and not (
+            len(parts) == 1 and re.match(r"^bit\d+$", cell)
+        ):
+            return None
         cells.append(cell)
 
-    return _build_html([], [cells], False)
+    html = _build_html([], [cells], False)
+    if caption_lines:
+        caption = " ".join(row[0][0] for row in caption_lines)
+        html = html.replace("<table>", f"<table><caption>{escape(caption)}</caption>", 1)
+    return html
 
 
 def _join_inline_spans(spans):
@@ -433,13 +451,16 @@ def _reconstruct_definition_html(lines, bbox):
     bx0, _, bx1, _ = bbox
     left_x = min(span[1] for span in spans)
     left_tolerance = max(3.0, (bx1 - bx0) * 0.03)
-    keys = [
-        span
-        for span in spans
-        if span[1] <= left_x + left_tolerance
-        and not re.search(r"\s", span[0])
-        and _CODE_CELL.match(span[0])
-    ]
+    keys = []
+    for span in spans:
+        normalized = re.sub(r"\s+", "", span[0])
+        spaced_key = bool(re.search(r"\s", span[0]))
+        if (
+            span[1] <= left_x + left_tolerance
+            and _CODE_CELL.match(normalized)
+            and (not spaced_key or span[0].upper() == span[0])
+        ):
+            keys.append((normalized, *span[1:]))
     if not keys:
         return None
 

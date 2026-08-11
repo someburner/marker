@@ -24,6 +24,32 @@ def test_reconstructs_wrapped_register_bitfield():
     assert table_cells(html) == ["DRDY_PULSED", "INT2_ON_INT1", "RESERVED0"]
 
 
+def test_reconstructs_captioned_bitfield_with_short_edge_cells():
+    lines = [
+        ([("Table 26. WHO_AM_I register default values", 80, 220)], 2, 10),
+        (
+            [
+                ("X_L7", 10, 25),
+                ("X_L6", 60, 75),
+                ("X_L5", 110, 125),
+                ("X_L4", 160, 175),
+                ("X_L3", 210, 225),
+                ("X_L2", 260, 275),
+                ("0", 325, 330),
+                ("0", 395, 400),
+            ],
+            18,
+            26,
+        ),
+    ]
+
+    html = reconstruct_sparse_table_html(lines, [0, 0, 410, 30])
+
+    soup = BeautifulSoup(html, "html.parser")
+    assert soup.caption.get_text() == "Table 26. WHO_AM_I register default values"
+    assert table_cells(html) == ["X_L7", "X_L6", "X_L5", "X_L4", "X_L3", "X_L2", "0", "0"]
+
+
 def test_reconstructs_field_description_rows():
     lines = [
         ([("FIELD_A", 10, 45)], 10, 18),
@@ -39,6 +65,23 @@ def test_reconstructs_field_description_rows():
         "First field description continued",
         "FIELD_B",
         "Second description",
+    ]
+
+
+def test_reconstructs_spaced_uppercase_field_names():
+    lines = [
+        ([("FF_DUR [4:0]", 10, 55)], 10, 18),
+        ([("Free-fall duration", 70, 150)], 7, 15),
+        ([("FF_THS [2:0]", 10, 55), ("Free-fall threshold", 70, 155)], 30, 38),
+    ]
+
+    html = reconstruct_sparse_table_html(lines, [0, 0, 180, 45])
+
+    assert table_cells(html) == [
+        "FF_DUR[4:0]",
+        "Free-fall duration",
+        "FF_THS[2:0]",
+        "Free-fall threshold",
     ]
 
 
