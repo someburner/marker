@@ -18,6 +18,7 @@ class JSONBlockOutput(BaseModel):
     children: List["JSONBlockOutput"] | None = None
     section_hierarchy: Dict[int, str] | None = None
     images: dict | None = None
+    chart_data: dict | None = None
 
 
 class JSONOutput(BaseModel):
@@ -51,6 +52,7 @@ class JSONRenderer(BaseRenderer):
         cls = get_block_class(block_output.id.block_type)
         if cls.__base__ == Block:
             html, images = self.extract_block_html(document, block_output)
+            block = document.get_block(block_output.id)
             return JSONBlockOutput(
                 html=html,
                 polygon=block_output.polygon.polygon,
@@ -58,6 +60,7 @@ class JSONRenderer(BaseRenderer):
                 id=str(block_output.id),
                 block_type=str(block_output.id.block_type),
                 images=images,
+                chart_data=getattr(block, "chart_data", None),
                 section_hierarchy=reformat_section_hierarchy(
                     block_output.section_hierarchy
                 ),

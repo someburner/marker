@@ -6,6 +6,7 @@ class Figure(Block):
     block_type: BlockTypes = BlockTypes.Figure
     description: str | None = None
     html: str | None = None
+    chart_data: dict | None = None
     block_description: str = "A chart or other image that contains data."
 
     def assemble_html(

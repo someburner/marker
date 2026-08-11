@@ -50,6 +50,7 @@ marker = "marker.scripts.convert:convert_cli"
 marker_single = "marker.scripts.convert_single:convert_single_cli"
 marker_gui = "marker.scripts.run_streamlit_app:streamlit_app_cli"
 marker_server = "marker.scripts.server:server_cli"
+marker_extract_chart = "marker.scripts.extract_chart:extract_chart_cli"
 
 [dependency-groups]
 dev = [

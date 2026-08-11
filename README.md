@@ -150,6 +150,47 @@ Options:
 
 OCR runs through the surya VLM, which is multilingual - see the [surya README](https://github.com/datalab-to/surya) for details.  If you don't need OCR, marker can work with any language.
 
+### Extract line-chart data
+
+Line-chart extraction is opt-in.  It detects the plot frame, OCRs numeric tick
+labels with Marker's existing Surya recognizer, infers linear or log10 axis
+transforms, and traces colored `y=f(x)` series.  Enable it for PDF conversion
+with a config file such as:
+
+```json
+{
+  "extract_line_charts": true,
+  "line_chart_maximum_series": 1,
+  "line_chart_point_stride": 1
+}
+```
+
+```shell
+marker_single datasheet.pdf --output_format json --config_json line-charts.json
+```
+
+Each successfully extracted `Figure` then has a `chart_data` object in JSON
+output containing the fitted axes, OCR ticks, plot bounds, series points, and
+per-point confidence.  Figures that do not contain a detectable calibrated
+line chart remain unchanged.
+
+Individual Marker image assets can be processed directly.  Surya is the
+default OCR engine; `--ocr-engine tesseract` is a lightweight optional adapter
+when a `tesseract` executable is already installed:
+
+```shell
+marker_extract_chart extract chart.jpeg \
+  --series response \
+  --ocr-engine tesseract \
+  --output chart.json \
+  --csv-output chart.csv \
+  --overlay chart-overlay.png
+```
+
+Use explicit `--x-min`, `--x-max`, `--y-min`, and `--y-max` when a chart has no
+readable ticks.  `marker_extract_chart validate manifest.json` validates
+calibrated crossings against checked reference values.
+
 ## Convert multiple files
 
 ```shell
