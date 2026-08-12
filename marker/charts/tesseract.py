@@ -9,6 +9,7 @@ import subprocess
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 from PIL import Image
 
@@ -16,6 +17,7 @@ from marker.charts.line import (
     ChartError,
     OCRResult,
     TickCrop,
+    parse_tick_value,
     prepare_ocr_crop,
 )
 
@@ -66,6 +68,22 @@ def _components(image: Image.Image, threshold: int = 210) -> list[_Component]:
                     )
                 )
     return components
+
+
+def _plain_decimal_decades(values: Sequence[str]) -> bool:
+    """Return true when OCR already found ordinary 10, 100, 1000 labels."""
+
+    if any(
+        re.search(r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]|\^|<\s*sup", value, re.IGNORECASE)
+        for value in values
+    ):
+        return False
+    parsed = [parse_tick_value(value) for value in values]
+    numeric = [value for value in parsed if value is not None and value > 0]
+    if len(numeric) < 3:
+        return False
+    ratios = [right / left for left, right in pairwise(numeric)]
+    return all(7.5 <= ratio <= 12.5 for ratio in ratios)
 
 
 class TesseractTickRecognizer:
@@ -129,11 +147,12 @@ class TesseractTickRecognizer:
         if not components:
             return image, image, None
         local_center = center - left
+        near_radius = max(image.height, round(half_width * 0.85))
         near = [
             component
             for component in components
-            if component.left <= local_center + image.height
-            and component.right >= local_center - image.height
+            if component.left <= local_center + near_radius
+            and component.right >= local_center - near_radius
         ]
         if not near:
             return image, image, None
@@ -245,12 +264,13 @@ class TesseractTickRecognizer:
         # Power-of-ten labels are centered on consecutive decade grid lines.
         # Candidate superscripts vote for the one consecutive-decade sequence
         # that best explains every label, making one bad tiny glyph harmless.
+        x_texts = [results[index].text for index in x_result_indices]
         base_candidates = {
             exponent - ordinal
             for ordinal, votes in enumerate(x_power_votes)
             for exponent in votes
         }
-        if base_candidates:
+        if base_candidates and not _plain_decimal_decades(x_texts):
             vote_counts = [Counter(votes) for votes in x_power_votes]
             base_exponent = max(
                 base_candidates,

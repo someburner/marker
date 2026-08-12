@@ -14,6 +14,7 @@ import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
+from itertools import pairwise
 from statistics import median
 from typing import Any, Protocol
 
@@ -381,7 +382,15 @@ def _x_label_band(image: Image.Image, plot: PlotBox) -> tuple[int, int]:
     ]
     if not groups:
         return plot.bottom + 1, min(image.height, plot.bottom + 24)
-    group = groups[0]
+    # JPEG extraction can move one or two rows of a thick bottom frame just
+    # outside the detected plot.  Such a row spans nearly the complete plot
+    # and must not be mistaken for the first row of tick labels.
+    label_groups = [
+        group
+        for group in groups
+        if max(counts[index] for index in group) < (plot.width + 1) * 0.60
+    ]
+    group = (label_groups or groups)[0]
     return (
         max(plot.bottom + 1, plot.bottom + 1 + group[0] - 2),
         min(image.height, plot.bottom + 1 + group[-1] + 3),
@@ -403,15 +412,33 @@ def _x_label_positions(
     occupied = [
         x for x in range(start, stop) if any(pixels[x, y] < 210 for y in range(*band))
     ]
-    groups = _group_adjacent(occupied, maximum_gap=3)
+    # A JPEG-compressed digit can be split by a four-pixel white gap.  Joining
+    # that gap keeps labels such as 1000 and 10000 in one crop.
+    groups = _group_adjacent(occupied, maximum_gap=4)
     maximum_width = max(18, (band[1] - band[0]) * 3)
-    positions = []
+    labels = []
     for group in groups:
         if len(group) < 2 or group[-1] - group[0] + 1 > maximum_width:
             continue
         center = round((group[0] + group[-1]) / 2)
+        labels.append((center, group[-1] - group[0] + 1))
+
+    # Plain decimal decades grow by roughly one glyph per label.  Their text
+    # center is more trustworthy than a grid line partly obscured by a curve;
+    # compact scientific-notation labels benefit from a wider snap tolerance.
+    widths = [width for _, width in labels]
+    growing_decimal_labels = len(widths) >= 3 and (
+        sum(right >= left + 4 for left, right in pairwise(widths))
+        >= len(widths) - 2
+        and widths[-1] >= widths[0] * 1.60
+    )
+    snap_tolerance = 3 if growing_decimal_labels else 7
+    positions = []
+    for center, _ in labels:
         nearby = min(grid_lines, key=lambda line: abs(line - center))
-        positions.append(nearby if abs(nearby - center) <= 7 else center)
+        positions.append(
+            nearby if abs(nearby - center) <= snap_tolerance else center
+        )
     return sorted(set(positions))
 
 
@@ -681,17 +708,25 @@ def infer_tick_calibration(
 
 def _pixel_strength(pixel: tuple[int, int, int], spec: SeriesSpec) -> float:
     chroma = max(pixel) - min(pixel)
-    if chroma < spec.minimum_chroma:
-        return 0.0
-    chroma_strength = min(1.0, chroma / 55.0)
     if spec.color is None:
-        return chroma_strength
+        if chroma < spec.minimum_chroma:
+            return 0.0
+        return min(1.0, chroma / 55.0)
     distance = math.sqrt(
         sum((component - target) ** 2 for component, target in zip(pixel, spec.color))
     )
     if distance >= spec.color_tolerance:
         return 0.0
-    return chroma_strength * (1.0 - distance / spec.color_tolerance)
+    target_chroma = max(spec.color) - min(spec.color)
+    distance_strength = 1.0 - distance / spec.color_tolerance
+    if target_chroma < 18:
+        # Explicit neutral colors are intentional series (for example a gray
+        # response curve), not missing chroma.  Squaring the distance score
+        # keeps black grid lines and their light antialiasing from dominating.
+        return distance_strength**2
+    if chroma < spec.minimum_chroma:
+        return 0.0
+    return min(1.0, chroma / 55.0) * distance_strength
 
 
 def _column_segments(
@@ -708,7 +743,14 @@ def _column_segments(
         return []
     groups = _group_adjacent(candidates, maximum_gap=2)
     segments: list[tuple[float, float]] = []
+    neutral_target = spec.color is not None and max(spec.color) - min(spec.color) < 18
     for group in groups:
+        # A one-pixel neutral fringe is usually antialiasing around a black
+        # grid line.  Real gray strokes occupy at least two adjacent rows.
+        if neutral_target and (
+            len(group) < 2 or len(group) > plot.height * 0.55
+        ):
+            continue
         weight = sum(strengths[pixel_y] for pixel_y in group)
         center = sum(pixel_y * strengths[pixel_y] for pixel_y in group) / weight
         confidence = min(1.0, max(strengths[pixel_y] for pixel_y in group))
@@ -807,27 +849,169 @@ def trace_series(
     )
 
 
+def _color_distance(
+    left: tuple[int, int, int], right: tuple[int, int, int]
+) -> float:
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
+
+
+def _legend_series_specs(
+    image: Image.Image,
+    plot: PlotBox,
+    *,
+    maximum_series: int,
+    minimum_chroma: int,
+) -> list[SeriesSpec]:
+    """Read the ordered color swatches from a compact in-plot legend."""
+
+    rgb = image.convert("RGB")
+    pixels = rgb.load()
+    x_start = plot.left + max(2, round(plot.width * 0.015))
+    x_stop = min(plot.right, plot.left + round(plot.width * 0.45))
+    y_start = plot.top + 2
+    y_stop = min(plot.bottom, plot.top + round(plot.height * 0.44))
+    minimum_run = max(10, round(plot.width * 0.025))
+    maximum_run = max(minimum_run + 1, round(plot.width * 0.16))
+    records: list[tuple[int, int, int, tuple[int, int, int], int]] = []
+
+    for y in range(y_start, y_stop):
+        occupied = []
+        for x in range(x_start, x_stop):
+            color = pixels[x, y]
+            chroma = max(color) - min(color)
+            luminance = sum(color) / 3
+            if chroma >= max(20, minimum_chroma * 2) or (
+                chroma <= 12 and 85 <= luminance <= 205
+            ):
+                occupied.append(x)
+        for group in _group_adjacent(occupied):
+            width = group[-1] - group[0] + 1
+            if not minimum_run <= width <= maximum_run:
+                continue
+            colors = [pixels[x, y] for x in group]
+            middle = len(colors) // 2
+            median_color = tuple(
+                sorted(color[channel] for color in colors)[middle]
+                for channel in range(3)
+            )
+            core = [
+                color
+                for color in colors
+                if _color_distance(color, median_color) <= 45
+            ]
+            if len(core) < len(colors) * 0.70:
+                continue
+            mean_color = tuple(
+                round(sum(color[channel] for color in core) / len(core))
+                for channel in range(3)
+            )
+            if max(mean_color) < 55 or min(mean_color) > 235:
+                continue
+            records.append((y, group[0], group[-1], mean_color, len(core)))
+
+    clusters: list[
+        list[tuple[int, int, int, tuple[int, int, int], int]]
+    ] = []
+    for record in records:
+        center = (record[1] + record[2]) / 2
+        cluster = next(
+            (
+                candidate
+                for candidate in reversed(clusters)
+                if record[0] - candidate[-1][0] <= 4
+                and abs(center - (candidate[-1][1] + candidate[-1][2]) / 2) <= 9
+            ),
+            None,
+        )
+        if cluster is None:
+            clusters.append([record])
+        else:
+            cluster.append(record)
+
+    representatives = []
+    for cluster in clusters:
+        if len({record[0] for record in cluster}) < 2:
+            continue
+
+        def quality(
+            record: tuple[int, int, int, tuple[int, int, int], int],
+        ) -> float:
+            color = record[3]
+            chroma = max(color) - min(color)
+            return chroma * 1.5 + 255 - sum(color) / 3 + record[4]
+
+        representatives.append(max(cluster, key=quality))
+
+    if not representatives:
+        return []
+    alignment_tolerance = max(10, round(plot.width * 0.03))
+    aligned_groups = []
+    for anchor in representatives:
+        anchor_center = (anchor[1] + anchor[2]) / 2
+        aligned_groups.append(
+            [
+                record
+                for record in representatives
+                if abs((record[1] + record[2]) / 2 - anchor_center)
+                <= alignment_tolerance
+            ]
+        )
+    aligned = max(
+        aligned_groups,
+        key=lambda group: (len(group), sum(record[4] for record in group)),
+    )
+    # Two incidental horizontal curve fragments are common in unlegended
+    # response plots.  Three aligned swatches are a reliable legend signal;
+    # smaller legends remain covered by the hue-based fallback below.
+    if len(aligned) < 3:
+        return []
+
+    specs = []
+    for number, record in enumerate(sorted(aligned)[:maximum_series], start=1):
+        color = record[3]
+        neutral = max(color) - min(color) < 18
+        specs.append(
+            SeriesSpec(
+                name=f"series_{number}",
+                color=color,
+                color_tolerance=45.0 if neutral else 65.0,
+                minimum_chroma=0 if neutral else minimum_chroma,
+            )
+        )
+    return specs
+
+
 def detect_series_specs(
     image: Image.Image,
     plot: PlotBox,
     *,
-    maximum_series: int = 4,
+    maximum_series: int = 8,
     minimum_chroma: int = 8,
 ) -> list[SeriesSpec]:
-    """Infer distinct colored lines from hue peaks inside the plot."""
+    """Infer series from legend swatches, falling back to plot hue peaks."""
+
+    legend_specs = _legend_series_specs(
+        image,
+        plot,
+        maximum_series=maximum_series,
+        minimum_chroma=minimum_chroma,
+    )
+    if legend_specs:
+        return legend_specs
 
     rgb = image.convert("RGB")
     pixels = rgb.load()
-    bins: list[list[tuple[int, int, int]]] = [[] for _ in range(24)]
+    bins: list[list[tuple[int, int, int]]] = [[] for _ in range(72)]
+    detection_chroma = max(20, minimum_chroma)
     for y in range(plot.top + 1, plot.bottom):
         for x in range(plot.left + 1, plot.right):
             color = pixels[x, y]
-            if max(color) - min(color) < minimum_chroma:
+            if max(color) - min(color) < detection_chroma:
                 continue
             hue, saturation, value = colorsys.rgb_to_hsv(
                 *(component / 255 for component in color)
             )
-            if saturation < 0.035 or value < 0.15:
+            if saturation < 0.12 or value < 0.15:
                 continue
             bins[int(hue * len(bins)) % len(bins)].append(color)
     minimum_support = max(8, round(plot.width * 0.025))
@@ -837,7 +1021,12 @@ def detect_series_specs(
         if len(bins[index]) < minimum_support:
             break
         if any(
-            min((index - other) % 24, (other - index) % 24) <= 1 for other in selected
+            min(
+                (index - other) % len(bins),
+                (other - index) % len(bins),
+            )
+            <= 2
+            for other in selected
         ):
             continue
         selected.append(index)
@@ -846,15 +1035,19 @@ def detect_series_specs(
     specs = []
     for number, index in enumerate(selected, start=1):
         colors = bins[index]
+        strongest = sorted(
+            colors, key=lambda color: max(color) - min(color), reverse=True
+        )[: max(1, len(colors) // 3)]
         mean_color = tuple(
-            round(sum(color[channel] for color in colors) / len(colors))
+            round(sum(color[channel] for color in strongest) / len(strongest))
             for channel in range(3)
         )
         specs.append(
             SeriesSpec(
                 name=f"series_{number}",
                 color=mean_color,
-                minimum_chroma=minimum_chroma,
+                color_tolerance=65.0,
+                minimum_chroma=detection_chroma,
             )
         )
     if not specs:
@@ -870,7 +1063,7 @@ def extract_line_chart(
     series_specs: Sequence[SeriesSpec] | None = None,
     x_scale: str = "auto",
     y_scale: str = "auto",
-    maximum_series: int = 4,
+    maximum_series: int = 8,
     minimum_chroma: int = 8,
 ) -> tuple[PlotBox, TickCalibration, list[Trace]]:
     plot, calibration = infer_tick_calibration(
@@ -899,6 +1092,13 @@ def find_x_at_y(
     if direction not in {"falling", "rising", "either"}:
         raise ChartError(f"unsupported crossing direction: {direction}")
     target_pixel = calibration.y_pixel(target_y, plot)
+    requested_color = (
+        parse_color(trace.requested_color) if trace.requested_color else None
+    )
+    neutral_trace = requested_color is not None and (
+        max(requested_color) - min(requested_color) < 18
+    )
+    neutral_candidates: list[tuple[tuple[float, float, int], float]] = []
     for index, (left, right) in enumerate(zip(trace.points, trace.points[1:])):
         if right.pixel_x - left.pixel_x > 8:
             continue
@@ -911,21 +1111,49 @@ def find_x_at_y(
             or (direction == "either" and (falling or rising))
         ):
             continue
+        confirmed = True
         if confirmation_points:
             post = trace.points[index + 1 : index + 1 + confirmation_points]
-            if len(post) < min(3, confirmation_points):
-                continue
-            if direction == "falling" and sum(
-                point.pixel_y >= target_pixel for point in post
-            ) < math.ceil(len(post) * 0.70):
-                continue
-            if direction == "rising" and sum(
-                point.pixel_y <= target_pixel for point in post
-            ) < math.ceil(len(post) * 0.70):
-                continue
+            threshold = math.ceil(len(post) * 0.70)
+            confirmed = not (
+                len(post) < min(3, confirmation_points)
+                or (
+                    direction == "falling"
+                    and sum(point.pixel_y >= target_pixel for point in post)
+                    < threshold
+                )
+                or (
+                    direction == "rising"
+                    and sum(point.pixel_y <= target_pixel for point in post)
+                    < threshold
+                )
+            )
+        high_confidence_vertical = (
+            min(left.confidence, right.confidence)
+            >= (0.75 if neutral_trace else 0.85)
+            and abs(delta) <= plot.height * 0.20
+        )
+        if not confirmed and not high_confidence_vertical:
+            continue
         fraction = (target_pixel - left.pixel_y) / delta
         pixel_x = left.pixel_x + fraction * (right.pixel_x - left.pixel_x)
-        return calibration.x_value(pixel_x, plot)
+        value = calibration.x_value(pixel_x, plot)
+        if not neutral_trace:
+            return value
+        if abs(delta) > plot.height * 0.30:
+            continue
+        neutral_candidates.append(
+            (
+                (
+                    min(left.confidence, right.confidence),
+                    (left.confidence + right.confidence) / 2,
+                    int(confirmed),
+                ),
+                value,
+            )
+        )
+    if neutral_candidates:
+        return max(neutral_candidates, key=lambda item: item[0])[1]
     raise ChartError(
         f"series {trace.name!r} does not cross y={target_y:g} toward {direction}"
     )
@@ -1008,13 +1236,21 @@ def write_overlay(
         color = palette[index % len(palette)]
         run: list[tuple[int, int]] = []
         previous_x: int | None = None
+        previous_y: float | None = None
         for point in trace.points:
-            if previous_x is not None and point.pixel_x - previous_x > 8:
+            if previous_x is not None and (
+                point.pixel_x - previous_x > 8
+                or (
+                    previous_y is not None
+                    and abs(point.pixel_y - previous_y) > plot.height * 0.15
+                )
+            ):
                 if len(run) > 1:
                     draw.line(run, fill=color, width=1)
                 run = []
             run.append((point.pixel_x, round(point.pixel_y)))
             previous_x = point.pixel_x
+            previous_y = point.pixel_y
         if len(run) > 1:
             draw.line(run, fill=color, width=1)
     overlay.save(path)

@@ -91,8 +91,8 @@ class LineChartProcessor(BaseProcessor):
     ] = "auto"
     line_chart_maximum_series: Annotated[
         int,
-        "Maximum number of colored line series detected per chart.",
-    ] = 1
+        "Maximum number of colored or neutral line series detected per chart.",
+    ] = 8
     line_chart_minimum_chroma: Annotated[
         int,
         "Minimum RGB channel spread for a plotted line pixel.",

@@ -160,7 +160,7 @@ with a config file such as:
 ```json
 {
   "extract_line_charts": true,
-  "line_chart_maximum_series": 1,
+  "line_chart_maximum_series": 8,
   "line_chart_point_stride": 1
 }
 ```

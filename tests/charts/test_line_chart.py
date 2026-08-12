@@ -4,16 +4,24 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from marker.charts.line import (
+    Axis,
+    Calibration,
     ChartError,
     OCRResult,
+    PlotBox,
+    Point,
     SeriesSpec,
     Tick,
+    Trace,
     detect_plot_box,
+    detect_series_specs,
     extract_line_chart,
     find_tick_crops,
+    find_x_at_y,
     fit_axis,
     parse_tick_value,
 )
+from marker.charts.tesseract import _plain_decimal_decades
 from marker.processors.line_chart import LineChartProcessor
 from marker.renderers.json import JSONRenderer
 from marker.schema import BlockTypes
@@ -200,3 +208,90 @@ def test_tick_crop_detection_uses_label_positions():
     plot = detect_plot_box(image)
     x_pixels = [crop.pixel for crop in find_tick_crops(image, plot) if crop.axis == "x"]
     assert x_pixels == pytest.approx(list(X_TICKS), abs=3)
+
+
+def test_tick_crop_detection_skips_thick_frame_below_plot():
+    image = Image.new("RGB", (500, 260), "white")
+    draw = ImageDraw.Draw(image)
+    plot = PlotBox(60, 20, 460, 210)
+    x_ticks = (60, 193, 327, 460)
+    for y in (20, 115, 210):
+        draw.line((plot.left, y, plot.right, y), fill=(180, 180, 180))
+    for x in x_ticks:
+        draw.line((x, plot.top, x, plot.bottom), fill=(180, 180, 180))
+    draw.line((plot.left, 211, plot.right, 211), fill="black", width=2)
+    for x, label in zip(x_ticks, ("10", "100", "1000", "10000")):
+        bbox = draw.textbbox((0, 0), label)
+        width = bbox[2] - bbox[0]
+        draw.text((x - width / 2, 220), label, fill="black")
+
+    detected = [
+        crop.pixel for crop in find_tick_crops(image, plot) if crop.axis == "x"
+    ]
+    assert detected == pytest.approx(x_ticks, abs=4)
+
+
+def test_tesseract_power_repair_preserves_plain_decimal_decades():
+    assert _plain_decimal_decades(["10", "100", "1000", "10000"])
+    assert not _plain_decimal_decades(["10²", "10³", "10⁴"])
+
+
+def test_detect_series_specs_reads_multiseries_legend_with_gray():
+    image = Image.new("RGB", (520, 320), "white")
+    draw = ImageDraw.Draw(image)
+    plot = PlotBox(50, 20, 500, 290)
+    draw.rectangle((plot.left, plot.top, plot.right, plot.bottom), outline="black")
+    colors = [
+        (70, 110, 185),
+        (225, 125, 60),
+        (165, 165, 165),
+        (245, 190, 25),
+        (100, 155, 200),
+        (120, 165, 80),
+        (105, 55, 150),
+    ]
+    for index, color in enumerate(colors):
+        y = 38 + index * 14
+        draw.line((70, y, 105, y), fill=color, width=3)
+
+    specs = detect_series_specs(image, plot, maximum_series=8, minimum_chroma=5)
+
+    assert len(specs) == 7
+    assert [spec.color for spec in specs] == colors
+    assert specs[2].minimum_chroma == 0
+
+
+def test_neutral_vertical_crossing_beats_grid_artifacts():
+    plot = PlotBox(10, 10, 110, 110)
+    calibration = Calibration(Axis(0, 10), Axis(-10, 10))
+    samples = [
+        (20, 20, 0.5),
+        (21, 90, 0.5),
+        (22, 90, 0.5),
+        (23, 90, 0.5),
+        (24, 90, 0.5),
+        (78, 50, 1.0),
+        (79, 70, 1.0),
+        (80, 50, 1.0),
+        (81, 50, 1.0),
+        (82, 50, 1.0),
+    ]
+    trace = Trace(
+        name="gray",
+        requested_color="#a4a4a4",
+        points=tuple(
+            Point(
+                x=calibration.x_value(x, plot),
+                y=calibration.y_value(y, plot),
+                pixel_x=x,
+                pixel_y=y,
+                confidence=confidence,
+                observed=True,
+            )
+            for x, y, confidence in samples
+        ),
+        observed_columns=len(samples),
+        plot_columns=plot.width + 1,
+    )
+
+    assert find_x_at_y(trace, 0, calibration, plot) == pytest.approx(6.85)

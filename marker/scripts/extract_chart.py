@@ -68,11 +68,17 @@ def _series(
     values: Sequence[str],
     image: Image.Image,
     plot: PlotBox,
+    maximum_series: int,
     minimum_chroma: int,
     color_tolerance: float,
 ) -> list[SeriesSpec]:
     if not values:
-        return detect_series_specs(image, plot, minimum_chroma=minimum_chroma)
+        return detect_series_specs(
+            image,
+            plot,
+            maximum_series=maximum_series,
+            minimum_chroma=minimum_chroma,
+        )
     specs = []
     for value in values:
         if "=" in value:
@@ -171,6 +177,7 @@ def extract_chart_cli():
     "--plot", "plot_value", default="auto", help="auto or left,top,right,bottom"
 )
 @click.option("--series", "series_values", multiple=True, metavar="NAME[=#RRGGBB]")
+@click.option("--maximum-series", type=int, default=8, show_default=True)
 @click.option("--minimum-chroma", type=int, default=5, show_default=True)
 @click.option("--color-tolerance", type=float, default=90.0, show_default=True)
 @click.option("--point-stride", type=int, default=1, show_default=True)
@@ -188,6 +195,7 @@ def extract_command(
     y_max: float | None,
     plot_value: str,
     series_values: Sequence[str],
+    maximum_series: int,
     minimum_chroma: int,
     color_tolerance: float,
     point_stride: int,
@@ -202,7 +210,12 @@ def extract_command(
         image = Image.open(image_path).convert("RGB")
         plot = _plot(plot_value, image)
         series_specs = _series(
-            series_values, image, plot, minimum_chroma, color_tolerance
+            series_values,
+            image,
+            plot,
+            max(1, maximum_series),
+            minimum_chroma,
+            color_tolerance,
         )
         bounds = (x_min, x_max, y_min, y_max)
         if any(value is not None for value in bounds):
